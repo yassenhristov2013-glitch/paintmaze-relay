@@ -5,6 +5,7 @@
 // Text (JSON):  {"op":"host"} -> {"op":"hosted","code","id":1}
 //               {"op":"join","code"} -> {"op":"joined","code","id"}, host gets {"op":"peer_joined","id"}
 //               {"op":"lock"} (host) -> nobody else can join;  {"op":"ping"} keeps the connection alive
+//               {"op":"max","n":20} (host) -> how many players this lobby takes (default 4, at most MAX_ROOM; FFA)
 // Binary:       [to][data...] -> forwarded as [from][data...] to player "to" (0 = everyone else)
 // Leaving: the host gets {"op":"peer_left","id"}; if the host leaves, everyone gets {"op":"host_left"}.
 
@@ -12,10 +13,11 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 
 const PORT = process.env.PORT || 9080;
-const MAX_PLAYERS = 4;
+const MAX_PLAYERS = 4; // a new lobby takes this many (the host can raise it with "max", for FFA)
+const MAX_ROOM = 20;
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O or 1/I
 
-const rooms = new Map(); // code -> {peers: Map(id -> ws), locked, next, made}
+const rooms = new Map(); // code -> {peers: Map(id -> ws), locked, next, made, max}
 
 // Opening the address in a browser shows this (handy to wake the server up before a game).
 const server = http.createServer((req, res) => {
@@ -66,7 +68,7 @@ wss.on("connection", (ws) => {
       if (typeof msg !== "object" || msg === null) return;
       if (msg.op === "host" && info.room === "") {
         const code = newCode();
-        rooms.set(code, { peers: new Map([[1, ws]]), locked: false, next: 2, made: Date.now() });
+        rooms.set(code, { peers: new Map([[1, ws]]), locked: false, next: 2, made: Date.now(), max: MAX_PLAYERS });
         info.room = code;
         info.id = 1;
         sendJson(ws, { op: "hosted", code, id: 1 });
@@ -77,7 +79,7 @@ wss.on("connection", (ws) => {
         const room = rooms.get(code);
         if (!room) return sendJson(ws, { op: "error", msg: "No game with that code." });
         if (room.locked) return sendJson(ws, { op: "error", msg: "That game has already started." });
-        if (room.peers.size >= MAX_PLAYERS) return sendJson(ws, { op: "error", msg: "That game is full." });
+        if (room.peers.size >= room.max) return sendJson(ws, { op: "error", msg: "That game is full." });
         const id = room.next++;
         room.peers.set(id, ws);
         info.room = code;
@@ -85,6 +87,9 @@ wss.on("connection", (ws) => {
         sendJson(ws, { op: "joined", code, id });
         sendJson(room.peers.get(1), { op: "peer_joined", id });
         console.log("player", id, "joined", code);
+      } else if (msg.op === "max" && info.id === 1 && rooms.has(info.room)) {
+        const n = Math.floor(Number(msg.n)) || MAX_PLAYERS;
+        rooms.get(info.room).max = Math.min(Math.max(n, 1), MAX_ROOM);
       } else if (msg.op === "lock" && info.id === 1 && rooms.has(info.room)) {
         rooms.get(info.room).locked = true;
       }
